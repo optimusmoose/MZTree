@@ -110,4 +110,4 @@ Prompts the server to save the currently loaded mzTree as a .mzTree file (sqlite
 This work is published under the Gnu General Public License (GPL) v2. Please see the LICENSE file at the root level of this repository for more details.
 
 ## Notice 
-Elements of this software are patent-pending. For commercial license opportunities, contact Dr. Rob Smith at robert.smith@mso.umt.edu.
+For commercial license opportunities, contact Dr. Rob Smith at robert.smith@mso.umt.edu.
