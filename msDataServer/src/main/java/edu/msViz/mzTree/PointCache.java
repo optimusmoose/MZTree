@@ -7,10 +7,11 @@ package edu.msViz.mzTree;
 
 import edu.msViz.mzTree.storage.StorageFacade;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Encapsulates a pointID -> MsDataPoint map, augmenting with data storage interaction
@@ -18,32 +19,26 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class PointCache 
 {
+    private static final Logger LOGGER = Logger.getLogger(PointCache.class.getName());
     
     // cache containing msDataPoints keyed by their IDs
-    private Map<Integer,MsDataPoint> cache;
+    private Map<Integer,MsDataPoint> cache = new ConcurrentHashMap<>();
     
     // limit on the number of entries allowed in the cache
     // estimated according to the java heap size
     private final long sizeLimit;
     
     // StorageFacade object initialized by the mzTree
-    public StorageFacade dataStorage;
-    
+    private StorageFacade dataStorage;
+
     /**
      * Default constructor accepting data storage implementation
      * @param dataStorage data storage implementation
-     * @param isConcurrent if true uses thread-safe Map implementation, else standard Map implementation
      */
-    public PointCache(StorageFacade dataStorage, boolean isConcurrent)
+    public PointCache(StorageFacade dataStorage)
     {
         // keep reference to data storage
         this.dataStorage = dataStorage;
-        
-        // instantiate cache
-        if(isConcurrent)
-            cache = new ConcurrentHashMap<>();
-        else
-            cache = new HashMap<>();
         
         // cap to 80% of heap
         float allowedRamPercentage = (float).8;
@@ -63,7 +58,7 @@ public class PointCache
      * @param pointIDs
      * @return 
      */
-    public ArrayList<MsDataPoint> retrievePoints(ArrayList<Integer> pointIDs)
+    public ArrayList<MsDataPoint> retrievePoints(List<Integer> pointIDs)
     {
         // points found in cache
         ArrayList<MsDataPoint> points = new ArrayList<>();
@@ -92,60 +87,7 @@ public class PointCache
                 loadedPoints = this.dataStorage.loadPoints(missedPoints);
             }
             catch(Exception ex){
-                System.err.println("Unable to load points from database || "+ ex.getMessage());
-                ex.printStackTrace();
-            }
-
-            if(loadedPoints != null) 
-            {
-                // cache the loaded points
-                this.putAll(loadedPoints);
-
-                // unify point lists and return
-                points.addAll(loadedPoints);
-            }
-        }
-        return points;
-    }
-    
-    /**
-     * Retrieves the points referenced by pointIDs. First, the cache is queried
-     * for any containing points. If the cache does not contain a requested point
-     * the database is queried for the point.
-     * @param pointIDs
-     * @return 
-     */
-    public ArrayList<MsDataPoint> retrievePoints(int[] pointIDs)
-    {
-        // points found in cache
-        ArrayList<MsDataPoint> points = new ArrayList<>();
-        
-        // points that cache missed
-        ArrayList<Integer> missedPoints = new ArrayList<>();
-        
-        // separate incoming IDs into hits/misses
-        for(int pointID : pointIDs){
-            MsDataPoint point;
-            if((point = this.cache.get(pointID)) != null)
-                points.add(point);
-            else
-                missedPoints.add(pointID);
-        }
-        
-        // make room in the cache for the missed points
-        this.makeRoom(missedPoints.size());
-        
-        // load points from storage if any to load
-        if(missedPoints.size() > 0){
-            
-            List<MsDataPoint> loadedPoints = null;
-            
-            try{
-                loadedPoints = this.dataStorage.loadPoints(missedPoints);
-            }
-            catch(Exception ex){
-                System.err.println("Unable to load points from database || "+ ex.getMessage());
-                ex.printStackTrace();
+                LOGGER.log(Level.WARNING, "Unable to load points from database", ex);
             }
 
             if(loadedPoints != null) 
@@ -173,6 +115,13 @@ public class PointCache
     }
     
     /**
+     * Clears the pointCache
+     */
+    public void clear() {
+        this.cache.clear();
+    }
+    
+    /**
      * retrieves a single point from the point cache, retrieving from storage
      * if the point is not currently cached
      * @param pointID ID of point to retrieve
@@ -193,8 +142,7 @@ public class PointCache
                 point = this.dataStorage.loadPoints( pointIDWrapper ).get(0);
             }
             catch (Exception ex){
-                System.err.println("Could not load point " + pointID + " from storage || " + ex.getMessage());
-                ex.printStackTrace();
+                LOGGER.log(Level.WARNING, "Could not load point " + pointID + " from storage", ex);
             }
         }
         
@@ -224,17 +172,6 @@ public class PointCache
      */
     public int size(){
         return this.cache.size();
-    }
-    
-    /**
-     * Updates the trace ID of a point ONLY if it is cached
-     * @param pointID ID of the point to update
-     * @param traceID updated trace ID value
-     */
-    public void shallowTraceUpdate(int pointID, short traceID)
-    {
-        if(this.cache.containsKey(pointID))
-            this.cache.get(pointID).traceID = traceID;
     }
     
 }

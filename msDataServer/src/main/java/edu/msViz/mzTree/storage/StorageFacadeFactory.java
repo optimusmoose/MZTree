@@ -12,7 +12,7 @@ package edu.msViz.mzTree.storage;
 public class StorageFacadeFactory
 {
     // Facade options
-    public static enum Facades { SQLite, Hybrid };
+    public static enum Facades { Hybrid };
     
     /**
      * Constructs the StorageFacade implementation corresponding to the facade choice
@@ -22,8 +22,6 @@ public class StorageFacadeFactory
     public static StorageFacade create(Facades choice){
         switch(choice){
             default:
-            case SQLite:
-                return new SQLiteStorage();
             case Hybrid:
                 return new HybridStorage();
         }

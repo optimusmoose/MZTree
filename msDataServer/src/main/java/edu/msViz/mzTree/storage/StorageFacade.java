@@ -5,12 +5,12 @@
  */
 package edu.msViz.mzTree.storage;
 
-import edu.msViz.msHttpApi.ImportMonitor;
+import edu.msViz.mzTree.ImportState;
 import edu.msViz.mzTree.MsDataPoint;
-import edu.msViz.mzTree.MzTree;
 import edu.msViz.mzTree.MzTreeNode;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.DataFormatException;
 
 /**
@@ -26,21 +26,32 @@ public interface StorageFacade
      * @throws DataFormatException 
      */
     public void init(String filepath, Integer numPoints) throws Exception;
-    
+
     /**
-     * Loads the model at the initialize location
-     * @param mzTree loaded from initialized location
-     * @throws java.lang.Exception
+     * @return The root node of the mzTree stored in this instance
+     * @throws Exception
      */
-    public void loadModel(MzTree mzTree) throws Exception;
-    
+    public MzTreeNode loadRootNode() throws Exception;
+
+    /**
+     * Loads the nodes which are children of the given parent node
+     * @throws Exception
+     */
+    public List<MzTreeNode> loadChildNodes(MzTreeNode parent) throws Exception;
+
     /**
      * Copies the data storage to a new location
      * @param targetFilepath
      * @throws Exception 
      */
     public void copy(Path targetFilepath) throws Exception;
-    
+
+    /**
+     * Queries the number of points stored
+     * @return number of points
+     */
+    public Integer getPointCount() throws Exception;
+
     /**
      * Gets the point IDs belonging to the specified node
      * @param nodeID
@@ -48,38 +59,7 @@ public interface StorageFacade
      * @throws Exception 
      */
     public List<Integer> getNodePointIDs(int nodeID) throws Exception;
-    
-    /**
-     * Updates the specified points to have the given traceID
-     * @param traceID updated traceID value
-     * @param pointIDs IDs of points to update
-     * @throws Exception 
-     */
-    public void updateTraces(short traceID, Integer[] pointIDs) throws Exception;
-    
-    /**
-     * Inserts a trace
-     * @param traceID ID of the new trace
-     * @param envelopeID initial envelope of the trace
-     * @throws Exception
-     */
-    public void insertTrace(short traceID, short envelopeID) throws Exception;
-    
-    /**
-     * Deletes the specified trace
-     * @param traceID ID of the trace to delete
-     * @throws Exception 
-     */
-    public void deleteTrace(short traceID) throws Exception;
-    
-    /**
-     * Updates the envelope IDs of the specified traces
-     * @param envelopeID updated envelope ID value
-     * @param traceIDs IDs of traces to update
-     * @throws Exception 
-     */
-    public void updateEnvelopes(short envelopeID, Integer[] traceIDs) throws Exception;
-    
+
     /**
      * Saves the node to the storage solution
      * @param node MzTreeNode to save
@@ -92,18 +72,18 @@ public interface StorageFacade
     /**
      * Saves the given points to the storage solution
      * @param points MsDataPoints to save
-     * @param importMonitor import progress monitor
+     * @param importState import progress monitor
      * @throws Exception 
      */
-    public void savePoints(SavePointsTask task, ImportMonitor importMonitor) throws Exception;
+    public void savePoints(SavePointsTask task, ImportState importState) throws Exception;
     
     /**
      * Saves NodePoint entities in storage
      * @param curNode recursive cursor
-     * @param importMonitor import progress monitro
+     * @param importState import progress monitro
      * @throws Exception 
      */
-    public void saveNodePoints(MzTreeNode curNode, ImportMonitor importMonitor) throws Exception;
+    public void saveNodePoints(MzTreeNode curNode, ImportState importState) throws Exception;
     
     /**
      * Loads the requested points from storage
@@ -126,18 +106,6 @@ public interface StorageFacade
     public List<MsDataPoint> loadLeavesPointsInBounds(List<MzTreeNode> leaves, double mzmin, double mzmax, float rtmin, float rtmax) throws Exception;
     
     /**
-     * Loads all of the points belonging to the inputted set of leaf mzTreeNodes, attempting to bulk load adjacent node blocks
-     * @param leaves leaf nodes whose points are to be returned
-     * @param mzmin
-     * @param mzmax
-     * @param rtmin
-     * @param rtmax
-     * @return list of points belonging to leaf nodes
-     * @throws java.lang.Exception
-     */
-    public List<MsDataPoint> loadLeavesPointsInBoundsClumped(List<MzTreeNode> leaves, double mzmin, double mzmax, float rtmin, float rtmax) throws Exception;
-    
-    /**
      * Performs any commits or updates that are required to flush
      * any potentially pending changes to disk
      * @throws java.lang.Exception
@@ -152,10 +120,9 @@ public interface StorageFacade
     
     /**
      * Finalizes and closes any resources managed by the storage solution
-     * @throws java.lang.Exception
      */
-    public void close() throws Exception;
-    
+    public void close();
+
     public class SavePointsTask {
         public MzTreeNode node;
         public List<MsDataPoint> dataset;

@@ -12,24 +12,25 @@ package edu.msViz.mzTree;
 public class MsDataPoint
 {
     // number of bytes required to hold point in main memory
-    // Actual memory required per point: 34 bytes
-    // Stored in multiples of 8 -> 40 bytes
-    // object pointer +8 -> 48 bytes
-    public static byte MEM_NUM_BYTES_PER_POINT = 48;
+    // calculated using profiler
+    // point -> 42 bytes per point object
+    // HashMap$Node -> 32 bytes per point
+    // Integer (used as hash key) -> 16 bytes per point
+    public static byte MEM_NUM_BYTES_PER_POINT = 90;
     
     // number of bytes required to store point on disk (not counting ID)
     // mz: 8 bytes
     // rt: 4 bytes
     // intensity: 8 bytes
-    // traceID: 2 bytes
-    // total = 8 + 4 + 8 + 2 = 22
-    public static byte DISK_NUM_BYTES_PER_POINT = 22;
+    // meta1: 4 bytes
+    // total = 8 + 4 + 8 + 4 = 24
+    public static byte DISK_NUM_BYTES_PER_POINT = 24;
 
     // point's global ID, corresponds to position in point file
     public int pointID;
     
-    // point's assigned trace
-    public short traceID;
+    // reserved metadata field
+    public int meta1;
     
     // point's mz value
     public double mz;
@@ -70,7 +71,7 @@ public class MsDataPoint
     
     @Override
     public String toString(){
-        return String.valueOf(this.traceID) + ","  
+        return String.valueOf(this.meta1) + ","  
                 + String.valueOf(this.mz) + "," + String.valueOf(this.rt) + "," + String.valueOf(this.intensity);
     }
     
@@ -80,14 +81,13 @@ public class MsDataPoint
         if ( !(aThat instanceof MsDataPoint) ) return false;
         
         MsDataPoint that = (MsDataPoint)aThat;
-        return this.intensity == that.intensity && this.mz == that.mz && this.rt == that.rt && this.traceID == that.traceID; //&& this.envelopeID == that.envelopeID;
+        return this.intensity == that.intensity && this.mz == that.mz && this.rt == that.rt && this.meta1 == that.meta1; 
     }
 
     @Override
     public int hashCode() {
         int hash = 3;
-        hash = 41 * hash + this.traceID;
-        //hash = 41 * hash + this.envelopeID;
+        hash = 41 * hash + this.meta1;
         hash = 41 * hash + (int) (Double.doubleToLongBits(this.mz) ^ (Double.doubleToLongBits(this.mz) >>> 32));
         hash = 41 * hash + Float.floatToIntBits(this.rt);
         hash = 41 * hash + (int) (Double.doubleToLongBits(this.intensity) ^ (Double.doubleToLongBits(this.intensity) >>> 32));

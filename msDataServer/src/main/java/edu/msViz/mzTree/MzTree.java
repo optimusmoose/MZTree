@@ -6,8 +6,7 @@
 package edu.msViz.mzTree;
 
 import com.opencsv.CSVReader;
-import edu.msViz.msHttpApi.ImportMonitor;
-import edu.msViz.msHttpApi.ImportMonitor.ImportStatus;
+import edu.msViz.mzTree.ImportState.ImportStatus;
 import edu.msViz.mzTree.storage.StorageFacade;
 import edu.msViz.mzTree.storage.StorageFacadeFactory;
 import edu.msViz.mzTree.summarization.SummarizationStrategy;
@@ -15,19 +14,24 @@ import edu.msViz.mzTree.summarization.SummarizationStrategyFactory;
 import edu.msViz.mzTree.summarization.SummarizationStrategyFactory.Strategy;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.zip.DataFormatException;
 import javax.xml.stream.XMLStreamException;
 import com.opencsv.CSVWriter;
-import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.util.Collections;
 import java.util.List;
 import org.apache.commons.lang.StringUtils;
+
 
 /**
  * R-Tree implementation for storing and accessing MS data
@@ -35,6 +39,8 @@ import org.apache.commons.lang.StringUtils;
  */
 public final class MzTree
 {
+    private static final Logger LOGGER = Logger.getLogger(MzTree.class.getName());
+
     // there is really no good reason for this...
     public static final int DEFAULT_TREE_HEIGHT = 4;
     
@@ -42,7 +48,7 @@ public final class MzTree
     // some disks ship with blocks of size 4096B, some with blocks of 512B. luckily 512 is a multiple of 4096
     // an MsDataPoint requires 22B, so we need the LCM of 4096 and 22, which is 45056
     // 45056B is 11 4096B disk blocks, 88 512B disk blocks, and 2048 points.
-    public static final int NUM_POINTS_PER_NODE = 45056;
+    public static final int NUM_POINTS_PER_NODE = 8192;
 
     // minimum branching factor for a partitioned load
     // ensures that we don't have a tiny branching factor that produces
@@ -50,7 +56,7 @@ public final class MzTree
     private static final int MINIMUM_BRANCHING_FACTOR = 4;
     
     // fraction of heap alloted for MsDataPoints
-    private static final float HEAP_FRACTION = .3f;
+    private static final float HEAP_FRACTION = .5f;
     
     // the branching factor of the tree (number of children per root/hidden node)
     public int branchingFactor;
@@ -68,50 +74,68 @@ public final class MzTree
     // point map, keyed by pointID for unified point storage
     public PointCache pointCache;
     
-    // mapping of traceIDs to envelopeIDs
-    public Map<Short,Short> traceMap;
-    
     // disk storage implementation
     public StorageFacade dataStorage;
     
     // static storage interface choice
-    private static final StorageFacadeFactory.Facades STORAGE_INTERFACE_CHOICE = StorageFacadeFactory.Facades.Hybrid; 
-
-    // timing variables
-    private long overallTreeBuildTime;
+    private static final StorageFacadeFactory.Facades STORAGE_INTERFACE_CHOICE = StorageFacadeFactory.Facades.Hybrid;
     
     // import progress monitor
-    private final ImportMonitor importMonitor;
+    private ImportState importState;
         
     /**
      * No argument constructor for basic initialization
      * @param importMonitor import progress monitor
      */
-    public MzTree(ImportMonitor importMonitor) {
-        this.importMonitor = importMonitor;
-        this.pointCache = new PointCache(null, false);
-        this.traceMap = new HashMap<>();
+    public MzTree() {
+        this.importState = new ImportState();
+    }
+
+
+    // A custom ConvertDestinationProvider can be set on the MzTree
+    // which will be used to determine where to save a converted MzTree file on import of csv or mzML
+    public interface ConvertDestinationProvider {
+        Path getDestinationPath(Path suggestedFilePath) throws Exception;
+    }
+
+    private ConvertDestinationProvider convertDestinationProvider = null;
+
+    public void setConvertDestinationProvider(ConvertDestinationProvider convertDestinationProvider) {
+        this.convertDestinationProvider = convertDestinationProvider;
     }
 
     //***********************************************//
     //                     LOAD                      //
     //***********************************************//
-    
+
+    private Path getConvertDestinationPath(Path sourceFilePath) throws Exception {
+        // date time file name
+        String suggestedFileName = new SimpleDateFormat("MM-dd-yyyy_HH-mm-ss").format(new java.util.Date()) + ".mzTree";
+        Path suggestedFilePath = sourceFilePath.resolveSibling(suggestedFileName);
+
+        // if a ConvertDestinationProvider has been given, use it to determine the output path
+        if (convertDestinationProvider == null) {
+            return suggestedFilePath;
+        } else {
+            return convertDestinationProvider.getDestinationPath(suggestedFilePath);
+        }
+    }
+
     /**
      * 
      * Loads an mzTree either by building from mzML or by reconnecting to an mzTree
      * @param filePath The path to the mzML or mzTree file
      * @param summarizationStrategy strategy to be used for summarization of points
-     * @param isPartitionedLoad flag signaling the user wishes to perform a memory-conservative load
      * @throws Exception 
      */
-    public void load(String filePath, Strategy summarizationStrategy, boolean isPartitionedLoad) throws Exception 
+    public void load(String filePath, Strategy summarizationStrategy) throws Exception
     {
         // construct the summarizer corresponding to user's choice
         this.summarizer = SummarizationStrategyFactory.create(summarizationStrategy);        
-        
-        // inform monitor of source file location
-        importMonitor.update(null, filePath);
+
+        // create ImportState and set source file location
+        this.importState.reset();
+        importState.setSourceFilePath(filePath);
         
         try 
         {
@@ -131,9 +155,9 @@ public final class MzTree
                 
                 // if the user specified a memory-conservative load
                 // and the partitioned load is necessary then perform a partitioned load
-                if(isPartitionedLoad && this.partitionedLoadConfiguration(mzmlParser))
+                if(this.partitionedLoadConfiguration(mzmlParser, Paths.get(filePath)))
                 {
-                    
+
                     this.partitionedLoad(mzmlParser);
                 }
 
@@ -141,53 +165,75 @@ public final class MzTree
                 else
                 {
                     // initialize mzmlParser
-                    this.standardLoad(mzmlParser);
+                    this.standardLoad(mzmlParser, filePath);
                 }
             }
 
-            importMonitor.update(null, ImportStatus.FINISHED);
-            
-            this.overallTreeBuildTime = System.currentTimeMillis() - start;
-            this.displayExecutionTimes();
+            importState.setImportStatus(ImportStatus.READY);
+            LOGGER.log(Level.INFO, "Tree Build Real Time: " + (System.currentTimeMillis() - start));
             
         } 
         catch (DataFormatException | XMLStreamException ex) 
         {
             // try as an mzTree file instead of XML+build in the 
             // occurence of DataFormatException or XMLStreamException
-                        
-            this.pointCache = new PointCache(null, false);
-            this.traceMap = new HashMap<>();
 
             // initialize data storage on mzTree file
             this.initDataStorage(STORAGE_INTERFACE_CHOICE, filePath, null);
 
-            // inform the importMonitor of an .mzTree load
-            this.importMonitor.update(null, ImportStatus.LOADING_MZTREE);
+            // inform the importState of an .mzTree load
+            this.importState.setImportStatus(ImportStatus.LOADING_MZTREE);
             
             // create mzTree from existing file
-            dataStorage.loadModel(this);
 
-            // inform importMonitor that mzTree load has finished
-            this.importMonitor.update(null, ImportStatus.FINISHED);
+            // recursively build tree from root node
+            this.head = dataStorage.loadRootNode();
+            this.recursiveTreeBuilder(this.head, 0);
+
+            // inform importState that mzTree load has finished
+            this.importState.setImportStatus(ImportStatus.READY);
+        }
+    }
+
+    /**
+     * Recursively builds the tree structure starting with the root node.
+     * Retrieves and constructs the MzTreeNode specified by the
+     * @param node Node from which to start recursive MzTree construction
+     */
+    private void recursiveTreeBuilder(MzTreeNode node, int curDepth) throws Exception
+    {
+        // get all child nodes
+        List<MzTreeNode> childNodes = dataStorage.loadChildNodes(node);
+
+        // leaf nodes update tree height (results in largest height)
+        if(childNodes.isEmpty())
+            this.treeHeight = (curDepth > this.treeHeight) ? (short)curDepth : this.treeHeight;
+
+        // recurse on each child node if there are any
+        for(MzTreeNode childNode : childNodes)
+        {
+            // recursive call at +1 depth
+            this.recursiveTreeBuilder(childNode, curDepth+1);
+
+            // add reference to child and keep min/max mz/rt/int
+            node.addChildGetBounds(childNode);
         }
     }
 
     /**
      * Performs a partitioned load of the data set, resulting in conservative memory consumption
      * @param mzmlParser input mzml file parser
-     * @param importMonitor import progress monitor
      * @throws XMLStreamException
      * @throws DataFormatException
      * @throws IOException 
      */
     private void partitionedLoad(MzmlParser mzmlParser) throws XMLStreamException, DataFormatException, IOException
     {
-        
-        System.out.println("Partitioned load w/ " + this.branchingFactor + " partitions");
+
+        LOGGER.log(Level.INFO, "Partitioned load w/ " + this.branchingFactor + " partitions");
         
         // signal to the import monitor that tree building has begun
-        this.importMonitor.update(null, ImportStatus.BUILDING);
+        this.importState.setImportStatus(ImportStatus.CONVERTING);
         
         // init head node
         this.head = new MzTreeNode(this.branchingFactor);
@@ -201,18 +247,20 @@ public final class MzTree
             
             // load level 1 node's partition
             List<MsDataPoint> curPartition = mzmlParser.readPartition();
-            
+
             // recursively construct level 1 node
             this.divide(true, curPartition, curL1Node , 1);
             
             // add the level 1 node to the root node
             this.head.addChildGetBounds(curL1Node);
+
+            LOGGER.log(Level.INFO, "Completed partition " + i);
             
-            System.out.println("Completed partition " + i);
+            this.pointCache.clear();
         }
         
         // root node summarization!!!!!!
-        this.head.summarizeFromChildren(MzTree.NUM_POINTS_PER_NODE, this.summarizer, this.dataStorage);
+        this.head.summarizeFromChildren(MzTree.NUM_POINTS_PER_NODE, this.summarizer, this.pointCache);
         
         // recursively save node information (only points are saved during construction)
         this.recursiveNodeSave(this.head, 0);
@@ -221,48 +269,41 @@ public final class MzTree
             // commit all entries
             this.dataStorage.flush();
         } catch (Exception ex) {
-            System.err.println("Could not flush entries to storage || " + ex.getMessage());
-            ex.printStackTrace();
-            return;
+            LOGGER.log(Level.WARNING, "Could not flush entries to storage", ex);
         }   
     }
     
     /**
      * Performs a standard, memory-apathetic load
      * @param mzmlParser input file parser initialized w/ target file
-     * @param importMonitor import progress monitor
      * @throws IOException
      * @throws XMLStreamException
      * @throws DataFormatException 
      */
-    private void standardLoad(MzmlParser mzmlParser) throws IOException, XMLStreamException, DataFormatException, Exception
+    private void standardLoad(MzmlParser mzmlParser, String filePath) throws Exception
     {   
-        importMonitor.update(null, ImportStatus.PARSING);
+        importState.setImportStatus(ImportStatus.PARSING);
 
         List<MsDataPoint> dataset = mzmlParser.readAllData();
 
-        this.buildTreeFromRoot(dataset);
+        this.buildTreeFromRoot(dataset, Paths.get(filePath));
     }
     
     /**
-     * Loads MS data in csv format (mz, rt, intensity, traceID, envelopeID)
+     * Loads MS data in csv format (mz, rt, intensity, meta1)
      * @param filePath path to csv file
-     * @param importMonitor
      * @throws FileNotFoundException
      * @throws IOException
      * @throws Exception 
      */
     private void csvLoad(String filePath) throws FileNotFoundException, IOException, Exception
     {
-        this.importMonitor.update(null, ImportStatus.PARSING);
+        this.importState.setImportStatus(ImportStatus.PARSING);
         
         ArrayList<MsDataPoint> points = new ArrayList<>();
         
         // open csv reader on targetted csv file
         CSVReader reader = new CSVReader(new FileReader(filePath));
-        
-        // point ID iterator
-        int id = 1;
         
         // first line might be a header
         String[] line = reader.readNext();
@@ -271,40 +312,32 @@ public final class MzTree
         if(line != null && StringUtils.isNumeric(line[0]))
         {
             // convert to msdatapoint, collect
-            MsDataPoint point = this.csvRowToMsDataPoint(line, id);
+            MsDataPoint point = this.csvRowToMsDataPoint(line);
             points.add(point);
-            id++;
-            
-            // add the trace if it doesn't already exist and isn't zero
-            if(point.traceID != 0 && !this.traceMap.containsKey(point.traceID))
-                this.insertTrace(point.traceID, Short.parseShort(line[4]));
         }
         
         // read the remaining lines (now guaranteed no header)
         while((line = reader.readNext()) != null)
         {
             // convert to msdatapoint, collect
-            MsDataPoint point = this.csvRowToMsDataPoint(line, id);
+            MsDataPoint point = this.csvRowToMsDataPoint(line);
             points.add(point);
-            id++;
-            
-            // add the trace if it doesn't already exist
-            if(point.traceID != 0 && !this.traceMap.containsKey(point.traceID))
-                this.insertTrace(point.traceID, Short.parseShort(line[4]));
         }
         
         // build that tree!
-        this.buildTreeFromRoot(points);
+        this.buildTreeFromRoot(points, Paths.get(filePath));
+        
     }
     
     /**
      * Constructs an MzTree from the dataset, starting at the root node (so no partitioned load)
      * @param dataset
-     * @param importMonitor 
      */
-    private void buildTreeFromRoot(List<MsDataPoint> dataset) throws Exception
+    private void buildTreeFromRoot(List<MsDataPoint> dataset, Path sourceFilePath) throws Exception
     {
-        this.initDataStorage(STORAGE_INTERFACE_CHOICE, null, dataset.size());
+        LOGGER.log(Level.INFO, "Building MzTree from " + dataset.size() + " points");
+
+        this.initDataStorage(STORAGE_INTERFACE_CHOICE, getConvertDestinationPath(sourceFilePath).toString(), dataset.size());
         
         // **************** STEP 1: CONFIGURE TREE ****************
 
@@ -319,15 +352,14 @@ public final class MzTree
         // init head node
         this.head = new MzTreeNode(this.branchingFactor);
 
-        // inform importMonitor of anticipated amount of work
+        // inform importState of anticipated amount of work
         int numPointsToSave = dataset.size(); // save points: dataset.length
-        int numNodePointsToSave = this.calculateNodePoints(numPointsToSave);
-        this.importMonitor.update(null, (float) (numPointsToSave + numNodePointsToSave));
+        this.importState.setTotalWork(numPointsToSave);
         
         // **************** STEP 2: BUILD ****************
         
-        this.importMonitor.update(null, ImportStatus.BUILDING);
-        
+        this.importState.setImportStatus(ImportStatus.CONVERTING);
+
         // divide the head node, do not sort at start (null), mzML data already sorted by RT
         this.divide(null, dataset, this.head, 0);
 
@@ -338,11 +370,8 @@ public final class MzTree
             // commit all entries
             this.dataStorage.flush();
         } catch (Exception ex) {
-            System.err.println("Could not flush entries to storage || " + ex.getMessage());
-            ex.printStackTrace();
-            return;
+            LOGGER.log(Level.WARNING, "Could not persist data to storage", ex);
         }
-        
     }
     
     /**
@@ -352,7 +381,6 @@ public final class MzTree
      * @param dataset The recursive call's data partition
      * @param head The recursive call's top level node
      * @param curHeight current height in three (root is 0)
-     * @param threadPool Pool to use when dividing sub-nodes, or null to run in same thread
      */
     private void divide(Boolean sort_by_rt, List<MsDataPoint> dataset, MzTreeNode head, int curHeight)
     {
@@ -364,12 +392,12 @@ public final class MzTree
         {
             // leaf node submits its dataset to be written to data store
             try{
-                this.dataStorage.savePoints(new StorageFacade.SavePointsTask(head,dataset), this.importMonitor);
+                this.dataStorage.savePoints(new StorageFacade.SavePointsTask(head,dataset), this.importState);
+                this.pointCache.putAll(dataset);
             }
             catch(Exception e)
             {
-                System.err.println("Could not save points to datastorage for leaf node: " + head.toString() + " | " + e.getMessage());
-                e.printStackTrace();
+                LOGGER.log(Level.WARNING, "Could not save points to datastorage for leaf node: " + head.toString(), e);
             }
             
             // collect point IDs, mz/rt/intensity min/max
@@ -387,9 +415,9 @@ public final class MzTree
             if(sort_by_rt != null)
             {
                 if (sort_by_rt)
-                    Collections.sort(dataset, Comparator.comparing((MsDataPoint dataPoint) -> dataPoint.rt));
+                    Collections.sort(dataset, Comparator.comparingDouble((MsDataPoint dataPoint) -> dataPoint.rt));
                 else
-                    Collections.sort(dataset, Comparator.comparing((MsDataPoint dataPoint) -> dataPoint.mz));
+                    Collections.sort(dataset, Comparator.comparingDouble((MsDataPoint dataPoint) -> dataPoint.mz));
             }
 
             // the partition size is the subset length divided by the numChildrenPerNode
@@ -432,7 +460,7 @@ public final class MzTree
             }
             
             // collect summary of points from child nodes (additionally saves pointIDs)
-            head.summarizeFromChildren(MzTree.NUM_POINTS_PER_NODE, this.summarizer, this.dataStorage);
+            head.summarizeFromChildren(MzTree.NUM_POINTS_PER_NODE, this.summarizer, this.pointCache);
             
         } // END ROOT/INTERMEDIATE NODE
         
@@ -454,10 +482,10 @@ public final class MzTree
      * @throws IOException
      * @throws DataFormatException 
      */
-    private boolean partitionedLoadConfiguration(MzmlParser mzmlParser) throws XMLStreamException, FileNotFoundException, IOException, DataFormatException, Exception
+    private boolean partitionedLoadConfiguration(MzmlParser mzmlParser, Path sourceFilePath) throws Exception
     {
         
-        this.importMonitor.update(null, ImportStatus.PARSING);
+        this.importState.setImportStatus(ImportStatus.PARSING);
         
         // count the number of points in the mzML file
         int numPoints = mzmlParser.countPoints();
@@ -495,12 +523,10 @@ public final class MzTree
             // recalculate partition size
             mzmlParser.initPartitionedRead(partitionSize);
             
-            this.initDataStorage(STORAGE_INTERFACE_CHOICE, null, numPoints);
+            this.initDataStorage(STORAGE_INTERFACE_CHOICE, getConvertDestinationPath(sourceFilePath).toString(), numPoints);
             
-            // inform importMonitor of the amount of work to do
-            int numPointsToSave = numPoints; // save points: dataset.length
-            int numNodePointsToSave = this.calculateNodePoints(numPointsToSave);
-            this.importMonitor.update(null, (float) (numPointsToSave + numNodePointsToSave));
+            // inform importState of the amount of work to do
+            this.importState.setTotalWork(numPoints);
             
             return true;
         }
@@ -523,7 +549,7 @@ public final class MzTree
             curNode.nodeID = this.dataStorage.saveNode(curNode, parentNodeID);
             
             // save node points to db
-            this.dataStorage.saveNodePoints(curNode, this.importMonitor);
+            this.dataStorage.saveNodePoints(curNode, this.importState);
             
             // recurse on chilren
             for(MzTreeNode childNode : curNode.children)
@@ -531,18 +557,28 @@ public final class MzTree
                 
         }
         catch(Exception e){
-            System.err.println("Could not save node || " + e.getMessage());
-            e.printStackTrace();
+            LOGGER.log(Level.WARNING, "Could not save node", e);
         }
         
     }
-    
+
+    public ImportState getImportState() {
+        return importState;
+    }
+
+    public ImportState.ImportStatus getLoadStatus() {
+        return importState.getImportStatus();
+    }
+
+    public String getLoadStatusString() {
+        return importState.getStatusString();
+    }
+
     /**
      * inits the data storage module
      * @param storageChoice Storage interface selection
      * @param filePath (optional) location to create storage file
      * @param numPoints (Hybrid only) number of points that will be saved in file
-     * @param importMonitor Import progress monitor
      * @throws Exception 
      */
     private void initDataStorage(StorageFacadeFactory.Facades storageChoice, String filePath, Integer numPoints) throws Exception
@@ -550,9 +586,9 @@ public final class MzTree
         // init data storage module
         this.dataStorage = StorageFacadeFactory.create(storageChoice);
         this.dataStorage.init(filePath, numPoints);
-        this.pointCache.dataStorage = this.dataStorage;
+        this.pointCache = new PointCache(this.dataStorage);
 
-        this.importMonitor.setMzTreeFilePath(this.dataStorage.getFilePath());
+        this.importState.setMzTreeFilePath(this.dataStorage.getFilePath());
     }
     
     //***********************************************//
@@ -566,15 +602,15 @@ public final class MzTree
      * @param mzMax query mz upper bound
      * @param rtMin query rt lower bound
      * @param rtMax query rt upper bound
-     * @param numPoints number of points to be returned
-     * @param intmin minimum intensity threshold to return a point
-     * @param shouldUseSummary
+     * @param numPoints number of points to be returned; 0 to return all points possible from the leaf depth and not use the cache
      * @return 2-dimensional double array
      */
     public List<MsDataPoint> query(double mzMin, double mzMax,
-            float rtMin, float rtMax, int numPoints, double intmin, boolean shouldUseSummary)
+                                   float rtMin, float rtMax, int numPoints)
     {
-        // if zero passed for any query bound use relative min/max
+        boolean useSummary = (numPoints > 0);
+
+        // if zero passed for any query bound use global min/max
         mzMin = (mzMin == 0) ? this.head.mzMin : mzMin;
         mzMax = (mzMax == 0) ? this.head.mzMax : mzMax;
         rtMin = (rtMin == 0) ? this.head.rtMin : rtMin;
@@ -583,83 +619,54 @@ public final class MzTree
         // current level in tree
         int curLevel = 0;
         
-        // all nodes in current level of tree whose bounds are within 
-        // the query's bounds
+        // all nodes in current level of tree within the query bounds
         ArrayList<MzTreeNode> curLevelNodesInBounds = new ArrayList<>();
         
         // IDs the points in the current level that are within the query bounds
         ArrayList<MsDataPoint> curLevelPointsInBounds = new ArrayList<>();
-        
-        if(shouldUseSummary){
-        
-            // search for the level in the tree that has curLevelPointsInBounds >= numPoints
-            // base case: curLevel is the leaf level
-            while(curLevelPointsInBounds.size() < numPoints && curLevel != this.treeHeight + 1){
 
-                // populates curLevelNodesInBounds with the children of the current curLevelNodesInBounds
-                // that are within the query's bounds
-                curLevelNodesInBounds = this.collectNextLevelNodesInBounds(curLevelNodesInBounds,mzMin,mzMax,rtMin,rtMax);
+        // follow down the tree all nodes within the query bounds
+        // base case: curLevel is the leaf level
+        while(curLevel != this.treeHeight + 1){
 
-                // find all curLevel's points within the query's bounds
-                curLevelPointsInBounds = this.collectPointsWithinBounds(curLevelNodesInBounds,mzMin,mzMax,rtMin,rtMax, intmin);
-                curLevel++;
+            // populates curLevelNodesInBounds with the children of the current curLevelNodesInBounds
+            // that are within the query's bounds
+            curLevelNodesInBounds = this.collectNextLevelNodesInBounds(curLevelNodesInBounds,mzMin,mzMax,rtMin,rtMax);
+            curLevel++;
+
+            if (useSummary) {
+                // find candidate points at current level
+                curLevelPointsInBounds = this.collectPointsWithinBounds(curLevelNodesInBounds,mzMin,mzMax,rtMin,rtMax);
+
+                // stop going down the tree early if enough points are found
+                if (curLevelPointsInBounds.size() >= numPoints) {
+                    break;
+                }
             }
-
-            // case to handle: the bounds were small enough to make it to the
-            // leaf nodes (curLevel == this.treeHeight)
-            // without surpassing numPoints (curLevelPointsInBounds.size() < numPoints)
-            // simply return all points
-            if(curLevelPointsInBounds.size() <= numPoints)
-                return curLevelPointsInBounds;
-
-            // else we made it to a level that has more points in bounds than
-            // numPoints (curLevelPointsInBounds.size() >= numPoints)
-            // (could be the leaf level)
-            // return sample from current points in bounds using the summarizer
-            else
-                return this.summarizer.summarize(curLevelPointsInBounds, numPoints);
-            
         }
-        
-        // else the leaf nodes must satisfy this query 
-        else
-        {
-            // search for the level in the tree that has curLevelPointsInBounds >= numPoints
-            // base case: curLevel is the leaf level
-            while(curLevel != this.treeHeight + 1){
 
-                // populates curLevelNodesInBounds with the children of the current curLevelNodesInBounds
-                // that are within the query's bounds
-                curLevelNodesInBounds = this.collectNextLevelNodesInBounds(curLevelNodesInBounds,mzMin,mzMax,rtMin,rtMax);
+        if(useSummary) {
+            // when using summary, the points have been collected and need to be summarized
 
-                curLevel++;
+            if(curLevelPointsInBounds.size() <= numPoints) {
+                // return all points if there are not enough to summarize
+                return curLevelPointsInBounds;
+            } else {
+                // return points sampled down using a summary
+                return this.summarizer.summarize(curLevelPointsInBounds, numPoints);
             }
-            
-            // all points belonging to the pertinent leaf nodes
-            try
-            {
+        } else {
+            // when not using summary, the points must be loaded from the leaf level
+
+            try {
                 // populate each node's pointID array
                 for(MzTreeNode node : curLevelNodesInBounds)
-                    if (node.pointIDs == null) 
-                    {
-                        // node.pointIDs is lazy loaded on first access, not on file open
-                        try {
-                            List<Integer> pointIDs = this.dataStorage.getNodePointIDs(node.nodeID);
-                            node.pointIDs = pointIDs.stream().mapToInt(x -> x).toArray();
-                        } 
-                        catch (Exception e) 
-                        {
-                            System.err.println("Failed to retrieve points for node. Future query results may be incomplete.");
-                            e.printStackTrace();
-                        }
-                    }
-                
+                    ensurePointIDs(node);
+
+                // use the leaf-node optimized query
                 return this.dataStorage.loadLeavesPointsInBounds(curLevelNodesInBounds, mzMin, mzMax, rtMin, rtMax);
-            }
-            catch(Exception e)
-            {
-                System.err.println("Failed to load points from the leaf level | " + e.getMessage());
-                e.printStackTrace();
+            } catch(Exception e) {
+                LOGGER.log(Level.WARNING, "Failed to load points from the leaf level", e);
                 return null;
             }
         }
@@ -721,43 +728,44 @@ public final class MzTree
      * @return List of MsDataPoints belonging to the given nodes that are within the given bounds
      */
     private ArrayList<MsDataPoint> collectPointsWithinBounds(ArrayList<MzTreeNode> nodes,
-            double mzMin, double mzMax, float rtMin, float rtMax, double intmin){
+                                                             double mzMin, double mzMax, float rtMin, float rtMax){
         
         // collect all point IDs from all nodes
         ArrayList<Integer> allNodesPointIDs = new ArrayList<>();
         for(MzTreeNode node : nodes) {
-            if (node.pointIDs == null) {
-                // node.pointIDs is lazy loaded on first access, not on file open
-                try {
-                    List<Integer> pointIDs = this.dataStorage.getNodePointIDs(node.nodeID);
-                    node.pointIDs = pointIDs.stream().mapToInt(x -> x).toArray();
-                } catch (Exception e) {
-                    System.err.println("Failed to retrieve points for node. Future query results may be incomplete.");
-                    e.printStackTrace();
-                }
-            }
-            
-            for(int pointID : node.pointIDs)
-                allNodesPointIDs.add(pointID);
+            ensurePointIDs(node);
+
+            allNodesPointIDs.addAll(node.pointIDs);
         }
-        
+
         // retrieve all points from pointCache
         ArrayList<MsDataPoint> allNodesPoints = this.pointCache.retrievePoints(allNodesPointIDs);
-        
+
         // arraylist for collecting points that fall within bounds
         ArrayList<MsDataPoint> pointsWithinBounds = new ArrayList<>();
-        
+
         // iterate through all nodes, checking to see if they fall within the bounds
         for(MsDataPoint pointToCheck : allNodesPoints){
-            
+
             // if in bounds then collect
-            if(pointToCheck.isInBounds(mzMin, mzMax, rtMin, rtMax) && pointToCheck.intensity >= intmin)
+            if(pointToCheck.isInBounds(mzMin, mzMax, rtMin, rtMax))
                 pointsWithinBounds.add(pointToCheck);
         }
-        
+
         return pointsWithinBounds;
     }
-   
+
+    private void ensurePointIDs(MzTreeNode node) {
+        if (node.pointIDs == null) {
+            // node.pointIDs is lazy loaded on first access, not on file open
+            try {
+                node.pointIDs = this.dataStorage.getNodePointIDs(node.nodeID);
+            } catch (Exception e) {
+                LOGGER.log(Level.WARNING, "Failed to retrieve points for node. Future query results may be incomplete.", e);
+            }
+        }
+    }
+
     /**
      * Checks if the search bounds overlap with a node's data bounds
      * @param node node to check
@@ -769,90 +777,43 @@ public final class MzTree
      */
     private boolean doesOverlap(MzTreeNode node, double mzMin, double mzMax, float rtMin, float rtMax)
     {
-        return // node's rtmin within search
-                (((node.rtMin >= rtMin && node.rtMin <= rtMax)
-                || // node's rtmax within search
-                (node.rtMax <= rtMax && node.rtMax >= rtMin)
-                || // node's rt range encapsulates search
-                (node.rtMin <= rtMin && node.rtMax >= rtMax))
-                && // node's mz min within search
-                ((node.mzMin >= mzMin && node.mzMin <= mzMax)
-                || // node's mz max within search
-                (node.mzMax <= mzMax && node.mzMax >= mzMin)
-                || // node's mz range encapsulated by search
-                (node.mzMin <= mzMin && node.mzMax >= mzMax)));
-    }
-    
-    //***********************************************//
-    //                 SEGMENTATION                  //
-    //***********************************************//
-    
-    /**
-     * Updates the points specified by pointIDs to have the given traceID
-     * @param traceID updated traceID value
-     * @param pointIDs IDs of points to update
-     * @throws java.lang.Exception
-     */
-    public void updateTraces(short traceID, Integer[] pointIDs) throws Exception
-    {
-        // update the trace of each point specified in pointIDs
-        for(int i = 0; i < pointIDs.length; i++)
-            this.pointCache.shallowTraceUpdate(pointIDs[i], traceID);
-            
-
-        this.dataStorage.updateTraces(traceID, pointIDs);
-      
-    }
-    
-    /**
-     * Creates a trace in the traceMap and storage
-     * @param traceID ID of the trace to add
-     * @param envelopeID initial envelope for the trace
-     * @throws java.lang.Exception
-     * 
-     */
-    public void insertTrace(short traceID, short envelopeID) throws Exception
-    {
-        this.traceMap.put(traceID, envelopeID);
-        
-        this.dataStorage.insertTrace(traceID, envelopeID);
-    }
-    
-    /**
-     * Deletes a trace from the traceMap and storage
-     * @param traceID ID of the trace to delete
-     * @throws java.lang.Exception
-     */
-    public void deleteTrace(short traceID) throws Exception
-    {
-        // delete trace from traceMap
-        this.traceMap.remove(traceID);
-        
-        // delete trace from storage
-        this.dataStorage.deleteTrace(traceID);        
-    }
-    
-    /**
-     * Updates the envelopeID of the specified traces
-     * @param envelopeID new envelope ID value
-     * @param traceIDs IDs of the traces to update
-     * @throws java.lang.Exception
-     */
-    public void updateEnvelopes(short envelopeID, Integer[] traceIDs) throws Exception
-    {
-        
-        // update each trace in the trace map
-        for(int i = 0; i < traceIDs.length; i++)
-            this.traceMap.put(traceIDs[i].shortValue(), envelopeID);
-        
-        // update traces in storage
-        this.dataStorage.updateEnvelopes(envelopeID, traceIDs);
+        return  // bounds overlap in mz
+                (node.mzMin <= mzMax && node.mzMax >= mzMin) &&
+                // bounds overlap in rt
+                (node.rtMin <= rtMax && node.rtMax >= rtMin);
     }
     
     //***********************************************//
     //                    CSV EXPORT                 //
     //***********************************************//
-    
+
+    public void saveAs(Path targetFilepath) throws Exception {
+        // source file path
+        Path sourceFilepath = Paths.get(this.dataStorage.getFilePath());
+
+        try{
+            // close current storage connection
+            this.dataStorage.close();
+
+            // copy current output location to new output location
+            this.dataStorage.copy(targetFilepath);
+
+            // init connection to new database
+            this.dataStorage.init(targetFilepath.toString(), null);
+        }
+        catch(Exception e){
+            LOGGER.log(Level.WARNING, "Could not create copy at " + targetFilepath.toString(), e);
+            try{
+                // revert back to previous connection
+                this.dataStorage.init(sourceFilepath.toString(), null);
+            }
+            catch(Exception ex){
+                LOGGER.log(Level.WARNING, "After failed copy, could not revert back to " + sourceFilepath.toString(), ex);
+            }
+            throw e;
+        }
+    }
+
     /**
      * Exports the given data range into a csv at filepath
      * @param filepath out location
@@ -862,7 +823,7 @@ public final class MzTree
      * @param maxRT upper rt bound
      * @throws java.io.IOException
      */
-    public void export(String filepath, double minMZ, double maxMZ, float minRT, float maxRT) throws IOException
+    public int export(String filepath, double minMZ, double maxMZ, float minRT, float maxRT) throws IOException
     {
         //append csv extension if not already there
         if(!filepath.endsWith(".csv"))
@@ -870,117 +831,62 @@ public final class MzTree
         
         try ( CSVWriter writer = new CSVWriter(new FileWriter(filepath)) ) 
         {
-            writer.writeNext(new String[] {"m/z","RT","intensity","traceID","envelopeID"});
+            writer.writeNext(new String[] {"m/z","RT","intensity","meta1"});
             
             // get the points of the data range
             // THIS IS WHERE THE OPTIMIZATION PROBLEM STARTS
             // currently loads all pertinent points into memory (could be the whole file)
-            List<MsDataPoint> points = this.query(minMZ, maxMZ, minRT, maxRT, Integer.MAX_VALUE, 0, false);
+            List<MsDataPoint> points = this.query(minMZ, maxMZ, minRT, maxRT, 0);
             
             // write away!
             for (MsDataPoint p : points)
-            {
-                int envelopeID = this.traceMap.containsKey(p.traceID) ? this.traceMap.get(p.traceID) : 0;
-                writer.writeNext( new String[] {Double.toString(p.mz), Float.toString(p.rt), Double.toString(p.intensity), Integer.toString(p.traceID), Integer.toString(envelopeID) });
-            }
-                
+                writer.writeNext( new String[] {Double.toString(p.mz), Float.toString(p.rt), Double.toString(p.intensity), Integer.toString(p.meta1) });
+            
+
+            return points.size();
         }
     }
     
+    /**
+     * If import status is ready, returns mz x rt bounds in order: mzmin, mzmax, rtmin, rtmax
+     * Else returns null
+     * @return mz x rt bounds (mzmin, mzmax, rtmin, rtmax) or null
+     */
+    public double[] getDataBounds()
+    {
+        // if not ready, then cannot access data bounds
+        if(importState.getImportStatus() != ImportStatus.READY)
+            return null;
+        
+        else
+            return new double[] {this.head.mzMin, this.head.mzMax, this.head.rtMin, this.head.rtMax};
+    }
     
     //***********************************************//
     //                   HELPERS                     //
     //***********************************************//
-    
-    /**
-     * Adds a list of points to the point cache
-     * @param points 
-     */
-    private void addToPointCache(List<MsDataPoint> points)
-    {
-        for(MsDataPoint point : points)
-            this.pointCache.put(point);
-    }
-    
-    /**
-     * Set's the storage facade object for both the MzTree and the point cache
-     * @param dataStorage 
-     */
-    public void setDataStorage(StorageFacade dataStorage)
-    {
-        this.dataStorage = dataStorage;
-        this.pointCache.dataStorage = this.dataStorage;
-    }
-    
-    /**
-     * Calculates the number of NodePoint entities to be processed
-     * in writing the MzTree to disk
-     * @return # NodePoint entities to be processed
-     */
-    private int calculateNodePoints(int totalPoints)
-    {
-        // number of points belong to all non-leaf nodes
-        // = # non-leaf nodes * # pts per node
-        int nonLeafNodeCount = this.geometricSeriesSum(this.branchingFactor, this.treeHeight - 1);
-        int nonLeafNodePointCount = nonLeafNodeCount * this.NUM_POINTS_PER_NODE;
-        
-        // number of points belonging to all leaf nodes
-        // its the entire dataset
-        int leafNodePointCount = totalPoints;
-        
-        return nonLeafNodePointCount + leafNodePointCount;
-    }
-    
-    /**
-     * Calculates a geometric series sum
-     * @param r geometric ratio
-     * @param n summation limit
-     * @return Geometric series sum
-     */
-    private int geometricSeriesSum(int r, int n){
-        if (r == 1) {
-            return r*n;
-        }
-        return (1 - (int)Math.pow(r, n + 1)) / (1 - r);
-    }
-    
+
     /**
      * Converts a csv row MsDataPoint to MsDataPoint object
      * @param line
-     * @param id
-     * @param envelopeID
-     * @return 
+     * @return
      */
-    private MsDataPoint csvRowToMsDataPoint(String[] line, int id)
+    private MsDataPoint csvRowToMsDataPoint(String[] line)
     {
         double mz = Double.parseDouble(line[0]);
         float rt = Float.parseFloat(line[1]);
         double intensity = Double.parseDouble(line[2]);
-        short traceID = Short.parseShort(line[3]);
-        MsDataPoint point = new MsDataPoint(id, mz, rt, intensity);
-        point.traceID = traceID;
+        int meta1 = Integer.parseInt(line[3]);
+        MsDataPoint point = new MsDataPoint(0, mz, rt, intensity);
+        point.meta1 = meta1;
         return point;
-    }
-    
-    private void displayExecutionTimes()
-    {   
-        System.out.println("Tree Build Real Time: " + this.overallTreeBuildTime);
     }
 
     public void close() 
     {
-        String filepath = this.dataStorage.getFilePath();
-        try{
+        if (this.dataStorage != null) {
             this.dataStorage.close();
+            dataStorage = null;
         }
-        catch(Exception e)
-        {
-            System.err.println("failed to close the datastorage");
-        }
-        
-        new File(filepath).delete();
-        new File(filepath+"-points").delete();
-        
-        
     }
 }

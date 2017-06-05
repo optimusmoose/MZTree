@@ -7,6 +7,7 @@ package edu.msViz.mzTree.summarization;
 
 import edu.msViz.mzTree.MsDataPoint;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 
 /**
@@ -22,42 +23,46 @@ public class WeightedStridingStrategy extends SummarizationStrategy
     @Override
     public List<MsDataPoint> summarize(List<MsDataPoint> dataset, int numPoints)
     {
-        // selected points
-        List<MsDataPoint> selection = new ArrayList<>(numPoints);
-        
-        // intensity accumulator
-        // collects intensities of a sequence of points
+        if (dataset.size() <= numPoints) {
+            return new ArrayList<>(dataset);
+        }
+
+        List<MsDataPoint> skippedPoints = new ArrayList<>();
+        ArrayList<MsDataPoint> selection = new ArrayList<>(numPoints);
+
+        // running total of accumulated intensity since the last selected point
         double intensityAccumulation = 0;
         
-        // accumulation threshold
-        // when accumulating intensities, exceeding this threshold collects the point
-        // that overtook the threshold and resets the accumulator
+        // Threshold used during accumulation to decide when a point is included.
+        // Total intensity divided by desired number of points gets a nice looking sample
         double accumulationThreshold = this.sumIntensity(dataset) / numPoints;
 
-        // accumulate the intensities of each point, collecting points that
-        // send the intensity accumulation over the accumulation threshold.
-        // Intensity accumulation resets after exceeding accumulation threshold
-        int i = 0; // index for current stride position
-        while (true) {
-            intensityAccumulation += dataset.get(i).intensity;
-            if (intensityAccumulation > accumulationThreshold) {
-                selection.add(dataset.get(i));
+        int i = 0;
+        while (selection.size() < numPoints) {
+            MsDataPoint point = dataset.get(i);
+            intensityAccumulation += point.intensity;
+
+            // when accumulation passes the threshold, select the point and reduce the accumulator
+            if (intensityAccumulation >= (accumulationThreshold - 1.0e-5)) {
+                selection.add(point);
                 intensityAccumulation -= accumulationThreshold;
-                if (selection.size() >= numPoints) {
-                    break;
-                }
-            }
-            i += STRIDE_LENGTH;
-            if (i >= dataset.size()) {
-                // stride through data again, starting with a new index
-                i = (i%STRIDE_LENGTH) + 1;
-                if (i == 0) {
-                    // in this case, we start revisiting data points from the start of the set.
-                    System.err.println("Got " + dataset.size() + ". Wanted " + numPoints + ". Returned " + selection.size() + ".");
-                    break;   // break and have less than numPoints instead of including some points twice.
-                }
+            } else {
+                skippedPoints.add(point);
             }
             
+            i += STRIDE_LENGTH;
+
+            if (i >= dataset.size()) {
+                // stride through data again, starting with a new index
+                i = (i+1) % STRIDE_LENGTH;
+            }
+
+            if (i == 0) {
+                // every point in dataset has been examined, so now only consider the previously skipped points
+                // this prevents already added points from being added again
+                dataset = skippedPoints;
+                skippedPoints = new ArrayList<>();
+            }
         }
         
         return selection;

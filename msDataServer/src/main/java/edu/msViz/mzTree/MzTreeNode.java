@@ -5,10 +5,8 @@
  */
 package edu.msViz.mzTree;
 
-import edu.msViz.mzTree.storage.StorageFacade;
 import edu.msViz.mzTree.summarization.SummarizationStrategy;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -32,7 +30,7 @@ public class MzTreeNode {
     public ArrayList<MzTreeNode> children;
     
     // IDs of the MsDataPoints belonging to this node
-    public int[] pointIDs;
+    public List<Integer> pointIDs;
     
     //minimum mz at this node and below
     public double mzMin;
@@ -135,11 +133,7 @@ public class MzTreeNode {
      * @param points dataset to process
      */
     public void collectPointIDs(List<MsDataPoint> points){
-        this.pointIDs = new int[points.size()];
-        for(int i = 0; i < points.size(); i++)
-        {
-            this.pointIDs[i] = points.get(i).pointID;
-        }
+        this.pointIDs = points.stream().map(p -> p.pointID).collect(Collectors.toList());
     }
     
     /**
@@ -148,23 +142,15 @@ public class MzTreeNode {
      * @param summarizer summarization strategy to gather sample with
      * @param dataStorage
      */
-    public void summarizeFromChildren(int numPoints, SummarizationStrategy summarizer, StorageFacade dataStorage)
+    public void summarizeFromChildren(int numPoints, SummarizationStrategy summarizer, PointCache pointCache)
     {
         List<MsDataPoint> childrensPoints = new ArrayList<>();
         
         
         // collect all childrens' MsDataPoints from cache
-        for(MzTreeNode childNode : this.children)
-            try{
-                childrensPoints.addAll(dataStorage.loadPoints(Arrays.stream(childNode.pointIDs).boxed().collect(Collectors.toList())));
-            }
-            catch (Exception e)
-            {
-                System.err.println("Failed to load data points from storage during summarization | " + e.getMessage());
-                e.printStackTrace();
-            }
-        
-        
+        for(MzTreeNode childNode : this.children) {
+            childrensPoints.addAll(pointCache.retrievePoints(childNode.pointIDs));
+        }
         
         // summarize and collect point IDs
         this.collectPointIDs(summarizer.summarize(childrensPoints, numPoints));

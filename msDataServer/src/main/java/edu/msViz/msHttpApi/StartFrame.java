@@ -1,25 +1,12 @@
 package edu.msViz.msHttpApi;
 
-import java.awt.event.ActionEvent;
-import java.net.MalformedURLException;
-import java.net.URL;
-import javax.swing.JButton;
-import javax.swing.JFrame;
-import javax.swing.JLabel;
-import javax.swing.JOptionPane;
-import javax.swing.JPanel;
-import javax.swing.JTextField;
-import edu.msViz.mzTree.summarization.SummarizationStrategyFactory.Strategy;
-import java.awt.CardLayout;
-import java.awt.Desktop;
-import java.awt.GridBagConstraints;
-import java.awt.GridBagLayout;
-import java.awt.Insets;
-import java.io.IOException;
-import java.net.URI;
-import javax.swing.JFileChooser;
-import javax.swing.filechooser.FileNameExtensionFilter;
-import org.apache.commons.lang.StringUtils;
+import javax.swing.*;
+import javax.swing.border.TitledBorder;
+
+import edu.msViz.mzTree.MzTree;
+import java.awt.*;
+import java.awt.event.KeyEvent;
+import java.util.logging.*;
 
 /**
  * MsDataServer GUI class
@@ -27,299 +14,114 @@ import org.apache.commons.lang.StringUtils;
  * 
  */
 public class StartFrame extends JFrame {
-    
-    private JPanel cards = new JPanel(new CardLayout());
-    private InitPanel initPanel;
-    private final String initKey = "INIT";
-    private RangePanel rangePanel;
-    private final String rangeKey = "RANGE";
-    
+
+    private static final Logger LOGGER = Logger.getLogger(StartFrame.class.getName());
+
     // MsDataServer instance
-    private MsDataServer dataServer = MsDataServer.getInstance();
+    public MsDataServer dataServer = new MsDataServer();
+
+    // currently loaded MzTree instance
+    public MzTree mzTree;
     
     /**
      * Program start. Configures and displays StartFrame 
      * @param args command line args
      */
     public static void main(String[] args) {
-        StartFrame frame = new StartFrame("MsDataServer");
+        StartFrame frame = new StartFrame();
+        frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
+        frame.setLocationRelativeTo(null);
+        frame.setVisible(true);
     }
-    
+
+    private JTextField serverStatusText;
+    private FilePanel filePanel;
+    private JTabbedPane tabPane;
+
     /**
      * Default constructor
      * @param frameTitle title of JFrame
      */
-    private StartFrame(String frameTitle){
-        super(frameTitle);
-        
-        this.initPanel = new InitPanel(this);
-        this.rangePanel = new RangePanel(this);
-        this.cards.add(this.initPanel,this.initKey);
-        this.cards.add(this.rangePanel,this.rangeKey);
-        
-        
-        this.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        this.setContentPane(this.cards);
+    private StartFrame(){
+        super("msViz");
+
+        JPanel startPanel = new JPanel();
+        startPanel.setLayout(new BorderLayout());
+
+        // create an error text area
+        JTextArea errorDisplay = new JTextArea();
+        errorDisplay.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        errorDisplay.setEditable(false);
+
+        // make the error text scrollable
+        JScrollPane errorScrollPane = new JScrollPane(errorDisplay);
+        errorScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_ALWAYS);
+
+        // add to the panel and register for error logging
+        startPanel.add(errorScrollPane, BorderLayout.CENTER);
+        LogManager.getLogManager().getLogger("").addHandler(new TextAreaLogHandler(errorDisplay));
+        LOGGER.log(Level.INFO, "Error logging ready.");
+
+        // add the status line
+        serverStatusText = new JTextField("Status: Unknown.");
+        serverStatusText.setEditable(false);
+        startPanel.add(serverStatusText, BorderLayout.PAGE_END);
+
+        // add main content area and file buttons
+        JPanel mainPanel = new JPanel();
+        mainPanel.setPreferredSize(new Dimension(300, 300));
+        mainPanel.setLayout(new BorderLayout());
+
+        filePanel = new FilePanel(this);
+        filePanel.setBorder(new TitledBorder("File"));
+        mainPanel.add(filePanel, BorderLayout.PAGE_START);
+
+        // add the operations tabs
+        tabPane = new JTabbedPane();
+        tabPane.addTab("Server", new ServerPanel(this.dataServer));
+        tabPane.setMnemonicAt(0, KeyEvent.VK_R);
+        tabPane.addTab("Export", new ExportPanel(this));
+        tabPane.setMnemonicAt(1, KeyEvent.VK_X);
+        mainPanel.add(tabPane, BorderLayout.CENTER);
+
+        setFileOpenState(false);
+
+        startPanel.add(mainPanel, BorderLayout.LINE_START);
+
+        this.setContentPane(startPanel);
         this.pack();
-        this.setLocationRelativeTo(null);
-        this.setVisible(true);
     }
-    
-    /**
-     * Override JFrame's toFront so frame is brought to
-     * front on windows and linux
-     */
-    @Override
-    public void toFront() {
-        
-        int sta = super.getExtendedState() & ~JFrame.ICONIFIED;
 
-        super.setExtendedState(sta);
-        super.setAlwaysOnTop(true);
-        super.toFront();
-        super.requestFocus();
-        super.setAlwaysOnTop(false);
-        
+    public void setStatusText(String status) {
+        this.serverStatusText.setText(status);
     }
-    
-    public void switchCard(String cardKey)
-    {
-        ((CardLayout)this.cards.getLayout()).show(this.cards, cardKey);
-    }
-    
-    /**
-     * Panel to be displayed on StartFrame
-     */
-    private static class InitPanel extends JPanel {
-        
-        // frame to display panel on
-        private StartFrame frame;
 
-        // Button texts
-        private static final String START_TEXT = "Start Server";
-        private static final String STOP_TEXT = "Stop Server";
-        private static final String OPEN_FILE_TEXT = "Open File";
-        private static final String EXPORT_TEXT = "Export";
-
-        // flag to track if server is running
-        private boolean running = false;
-
-        // panel's GUI components
-        private JTextField portEntry;
-        private JButton startStopButton;
-        private JButton openFileButton;
-        private JButton exportButton;
-
-        /**
-         * Default constructor
-         * Configures panel's components
-         */
-        public InitPanel(StartFrame frame) {
-            this.frame = frame;
-
-            setLayout(new GridBagLayout());
-            
-            GridBagConstraints c = new GridBagConstraints();
-            c.insets = new Insets(2, 2, 2, 2);
-            c.fill = GridBagConstraints.HORIZONTAL;
-
-            JLabel portLabel = new JLabel("Port:");
-            portLabel.setHorizontalAlignment(JLabel.RIGHT);
-            c.gridx = 0;
-            c.gridy = 0;
-            this.add(portLabel, c);
-            
-            portEntry = new JTextField("4567");
-            c.gridx = 1;
-            c.gridy = 0;
-            this.add(portEntry, c);
-            
-            c.gridx = 0;
-            c.gridwidth = 2;
-            c.fill = GridBagConstraints.NONE;
-            
-            startStopButton = new JButton(START_TEXT);
-            startStopButton.addActionListener(e -> startStopClicked(e));
-            c.gridy = 1;
-            this.add(startStopButton, c);
-
-            openFileButton = new JButton(OPEN_FILE_TEXT);
-            openFileButton.setEnabled(false);
-            openFileButton.addActionListener(e -> openFileClicked(e));
-            c.gridy = 2;
-            this.add(openFileButton, c);
-            
-            exportButton = new JButton(EXPORT_TEXT);
-            exportButton.setEnabled(false);
-            exportButton.addActionListener(e -> exportClicked(e));
-            c.gridy = 3;
-            this.add(exportButton, c);
-        }
-
-        private void startStopClicked(ActionEvent e) {
-            if (!running) {
-                try {
-                    int port = Integer.parseInt(portEntry.getText());
-                    this.frame.dataServer.startServer(port, frame, Strategy.WeightedStriding);
-                    this.frame.dataServer.waitUntilStarted();
-                    exportButton.setEnabled(true);
-                } catch (NumberFormatException ex) {
-                    portEntry.setText("4567");
-                }
-            } else {
-                this.frame.dataServer.stopServer();
-                exportButton.setEnabled(false);
-            }
-            running = !running;
-            startStopButton.setText(running ? STOP_TEXT : START_TEXT);
-            openFileButton.setEnabled(running);
-        }
-        
-        private void openFileClicked(ActionEvent e)
-        {
-            this.frame.dataServer.openFile();
-        }
-        
-        private void exportClicked(ActionEvent e)
-        {
-           if(!(this.frame.dataServer.fileStatus == MsDataServer.FileStatus.FILE_READY))
-               JOptionPane.showMessageDialog(this.frame, "No file currently loaded", "Error", JOptionPane.ERROR_MESSAGE);
-           else
-               this.frame.switchCard(this.frame.rangeKey);
+    public void setFileOpenState(boolean state) {
+        filePanel.setFileOpenState(state);
+        tabPane.setEnabledAt(tabPane.indexOfTab("Export"), state);
+        if (!state) {
+            tabPane.setSelectedIndex(tabPane.indexOfTab("Server"));
         }
     }
-    
-    private static class RangePanel extends JPanel
-    {
-        private StartFrame frame;
-        
-        private JTextField minMZ;
-        private JTextField maxMZ;
-        private JTextField minRT;
-        private JTextField maxRT;
-        private JButton OK;
-        private JButton CANCEL;
-        
-        public RangePanel(StartFrame frame)
-        {
-            this.frame = frame;
 
-            setLayout(new GridBagLayout());
-            
-            GridBagConstraints c = new GridBagConstraints();
-            c.insets = new Insets(2, 2, 2, 2);
-            c.fill = GridBagConstraints.HORIZONTAL;
-            
-            // min label
-            c.gridx = 1;
-            c.gridy = 0;
-            this.add(new JLabel("Min"), c);
-            
-            // max label
-            c.gridx = 2;
-            c.gridy = 0;
-            this.add(new JLabel("Max"), c);
-            
-            // mz label
-            c.gridx = 0;
-            c.gridy = 1;
-            this.add(new JLabel("m/z"), c);
-            
-            // rt label
-            c.gridx = 0;
-            c.gridy = 2;
-            this.add(new JLabel("RT"), c);
-            
-            // mz min
-            minMZ = new JTextField();
-            c.gridx = 1;
-            c.gridy = 1;
-            this.add(minMZ,c);
-            
-            // mz max
-            maxMZ = new JTextField();
-            c.gridx = 2;
-            c.gridy = 1;
-            this.add(maxMZ,c);
-            
-            // rt min
-            minRT = new JTextField();
-            c.gridx = 1;
-            c.gridy = 2;
-            this.add(minRT,c);
-            
-            // rt max
-            maxRT = new JTextField();
-            c.gridx = 2;
-            c.gridy = 2;
-            this.add(maxRT,c);
-            
-            // OK button            
-            OK = new JButton("OK");
-            OK.addActionListener(e -> okClicked(e));
-            c.gridx = 2;
-            c.gridy = 3;
-            this.add(OK,c);
-            
-            // CANCEL button
-            CANCEL = new JButton("Cancel");
-            CANCEL.addActionListener(e -> cancelClicked(e));
-            c.gridx = 1;
-            c.gridy = 3;
-            this.add(CANCEL,c);
+
+    private static class TextAreaLogHandler extends Handler {
+        private JTextArea textArea;
+        public TextAreaLogHandler(JTextArea textArea) {
+            this.textArea = textArea;
+
+            setLevel(Level.INFO);
+            setFormatter(new SimpleFormatter());
         }
-        
-        private void okClicked(ActionEvent e)
-        {
-            String s_minMZ, s_maxMZ, s_minRT, s_maxRT;
-            s_minMZ = this.minMZ.getText();
-            s_maxMZ = this.maxMZ.getText();
-            s_minRT = this.minRT.getText();
-            s_maxRT = this.maxRT.getText();
-            
-            // validate input as numeric (allows empty strings)
-            if(StringUtils.isNumeric(s_minMZ) && StringUtils.isNumeric(s_maxMZ) && StringUtils.isNumeric(s_minRT) && StringUtils.isNumeric(s_maxRT))
-            {
-                JFileChooser outputFileChooser = new JFileChooser();
-                outputFileChooser.setDialogTitle("Export");
-                outputFileChooser.setFileFilter(new FileNameExtensionFilter(".csv", "csv"));
-                int outputFileResult = outputFileChooser.showSaveDialog(this.frame);
-                
-                // continue only if file selected
-                if(outputFileResult == JFileChooser.APPROVE_OPTION)
-                {
-                    double d_minMZ, d_maxMZ, d_minRT, d_maxRT;
-                    d_minMZ = !s_minMZ.isEmpty() ? Double.parseDouble(s_minMZ) : Double.MIN_VALUE;
-                    d_maxMZ = !s_maxMZ.isEmpty() ? Double.parseDouble(s_maxMZ) : Double.MAX_VALUE;
-                    d_minRT = !s_minRT.isEmpty() ? Double.parseDouble(s_minRT) : Double.MIN_VALUE;
-                    d_maxRT = !s_maxRT.isEmpty() ? Double.parseDouble(s_maxRT) : Double.MAX_VALUE;
-                    
-                    String filepath = outputFileChooser.getSelectedFile().getPath();
-                    
-                    try 
-                    {
-                        this.frame.dataServer.exportCSV(filepath, d_minMZ, d_maxMZ, (float)d_minRT, (float)d_maxRT);
-                        JOptionPane.showMessageDialog(this.frame, "Finished CSV export");
-                    } 
-                    catch (IOException ex) 
-                    {
-                        JOptionPane.showMessageDialog(this.frame, "Could not export to CSV file || " + ex.getMessage() , "Error", JOptionPane.ERROR_MESSAGE);
-                    }
-                    finally
-                    {
-                        this.frame.switchCard(this.frame.initKey);
-                    }
-                }
-            }
-            else
-            {
-                JOptionPane.showMessageDialog(this.frame, "Invalid input", "Error", JOptionPane.ERROR_MESSAGE);
-            }
+
+        @Override
+        public void publish(LogRecord record) {
+            textArea.append(getFormatter().format(record));
         }
-        
-        private void cancelClicked(ActionEvent e)
-        {
-            this.frame.switchCard(this.frame.initKey);
-        }
+
+        @Override
+        public void flush() {}
+        @Override
+        public void close() throws SecurityException {}
     }
 }

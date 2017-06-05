@@ -52,7 +52,7 @@ public class MzmlParser {
      * Number of points in the mzml file
      * Null implies no count has been performed yet
      */
-    private Integer numPoints;
+    private int numPoints = -1;
     
     /**
      * When reading from mzml a chunk at a time the chunk will almost
@@ -78,7 +78,7 @@ public class MzmlParser {
      * @throws javax.xml.stream.XMLStreamException
      * @throws java.io.FileNotFoundException
      */
-    public MzmlParser(String filePath) throws XMLStreamException, FileNotFoundException
+    public MzmlParser(String filePath)
     {
         this.mzmlFilePath = filePath;        
     }
@@ -93,7 +93,7 @@ public class MzmlParser {
     public int countPoints() throws IOException, XMLStreamException, DataFormatException
     {
         // don't recount!
-        if(this.numPoints == null)
+        if(this.numPoints == -1)
         {
             // instantiate xml reader on mzmlFilePath
             this.reader = XMLInputFactory.newInstance().createXMLStreamReader(new FileInputStream(this.mzmlFilePath)); 
@@ -210,7 +210,6 @@ public class MzmlParser {
                 
                 if(!isCount)
                 {
-                    System.out.println("Loaded " + data.size() + " points from " + this.mzmlFilePath);
                     this.numPoints = data.size();
                 }
         
@@ -439,7 +438,7 @@ public class MzmlParser {
      * @param currentEncoding current encoded data object
      * @throws XMLStreamException 
      */
-    private void updateSpectrumInformation(String[] cvParamPair, SpectrumInformation currentSpecInfo, EncodedData currentEncoding) throws XMLStreamException {
+    private void updateSpectrumInformation(String[] cvParamPair, SpectrumInformation currentSpecInfo, EncodedData currentEncoding) {
         
         // null accession value implies badly formatted cvParam
         if (cvParamPair[0] == null) 
@@ -487,7 +486,7 @@ public class MzmlParser {
      * @return String array with elements [accession, value]
      * @throws XMLStreamException 
      */
-    private String[] examineCVParam(XMLStreamReader reader) throws XMLStreamException 
+    private String[] examineCVParam(XMLStreamReader reader)
     {
         String accession = reader.getAttributeValue(null, "accession");
         String value = reader.getAttributeValue(null, "value");
